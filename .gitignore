@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+node_modules/
+dist/
+
+.env
+*.env.local
+
+# Agent-facing spec, not meant for the GitHub-facing repo — see docs/ADR.md
+# for the human-facing architecture writeup instead.
+AGENTS.md
+
+backend/app/grpc_server/generated/*_pb2*.py
+backend/app/grpc_server/generated/*.pyi
+frontend/src/generated/*.js
+frontend/src/generated/*.d.ts
+frontend/src/generated/*ServiceClientPb.ts

@@ -1,0 +1,21 @@
+syntax = "proto3";
+package taskflow;
+
+// Service ini SENGAJA hanya berisi satu RPC: live update.
+// Semua command & query lain lewat REST.
+service BoardStreamService {
+  rpc StreamBoardUpdates (StreamBoardRequest) returns (stream BoardUpdateEvent);
+}
+
+message StreamBoardRequest {
+  string project_id = 1;
+}
+
+message BoardUpdateEvent {
+  string task_id = 1;
+  string title = 2;
+  string old_status = 3;
+  string new_status = 4;
+  string assignee_id = 5;
+  string changed_at = 6; // ISO 8601
+}

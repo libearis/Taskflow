@@ -1,0 +1,72 @@
+version: "3.9"
+
+# Postgres itself is NOT a service here — this machine already has a native
+# Postgres install, so the backend container connects out to it directly
+# (see DATABASE_URL below and .env) instead of running a second, redundant
+# Postgres in a container. Mongo has no such conflict, so it stays containerized.
+services:
+  mongo:
+    image: mongo:7
+    container_name: taskflow-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: taskflow-backend
+    environment:
+      # Read from .env (copy .env.example -> .env and fill in your native
+      # Postgres password) — never hardcode a real password into this file.
+      DATABASE_URL: ${DATABASE_URL}
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: taskflow
+      GRPC_PORT: "50051"
+      HTTP_PORT: "8000"
+      PROJECTOR_POLL_INTERVAL_SECONDS: "1"
+    ports:
+      - "8000:8000"   # REST API
+      - "50051:50051" # gRPC server-streaming (StreamBoardUpdates)
+    extra_hosts:
+      # Lets the container reach the native Postgres running on the Windows
+      # host. Docker Desktop resolves this out of the box; harmless to keep
+      # for engines that need the explicit mapping.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && python -m app.main"
+
+  envoy:
+    image: envoyproxy/envoy:v1.29-latest
+    container_name: taskflow-envoy
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+    ports:
+      - "8081:8080" # grpc-web proxy, only for BoardStreamService
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: taskflow-frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_GRPC_WEB_URL: http://localhost:8081
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+      - envoy
+
+volumes:
+  mongo_data:

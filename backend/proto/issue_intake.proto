@@ -1,0 +1,23 @@
+syntax = "proto3";
+package taskflow.intake.v1;
+
+// External systems (e.g. the .NET Catalog & Order Performance Lab) report
+// issues into TaskFlow through this RPC. Runs on the SAME gRPC server as
+// BoardStreamService (see grpc_server/servicer.py) — port 50051, one
+// grpc.aio.server() instance, two services registered on it.
+service IssueIntake {
+  rpc CreateIssue (CreateIssueRequest) returns (CreateIssueResponse);
+}
+
+message CreateIssueRequest {
+  string title = 1;
+  string description = 2;
+  string severity = 3;       // "low" | "medium" | "high"
+  string trigger_type = 4;   // "manual" | "automated" (automated not yet used)
+  string reported_by = 5;    // free text, e.g. "admin@lab" — no TaskFlow user account backs this
+}
+
+message CreateIssueResponse {
+  string issue_id = 1;
+  string status = 2;         // "created" — real failures surface as a gRPC error status, not this field
+}
