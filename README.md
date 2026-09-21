@@ -1,42 +1,42 @@
 # TaskFlow
 
-Mini task/project management app (mirip Jira versi kecil) — dibuat sebagai portfolio project untuk mendalami **CQRS**, **Outbox Pattern**, dan penggunaan **gRPC yang tepat sasaran**, dikemas sebagai *modular monolith* (bukan microservice).
+A small task/project management app (think a scaled-down Jira) built as a portfolio project to explore **CQRS**, the **Outbox Pattern**, and **gRPC used only where it actually fits** — packaged as a *modular monolith*, not a microservice split.
 
 ![status](https://img.shields.io/badge/status-portfolio--project-blue)
 
-## Kenapa project ini dibuat
+## Why this project exists
 
-Project ini fokus ke pattern yang sering disalahpahami: **CQRS itu soal pemisahan tanggung jawab baca/tulis, bukan alasan untuk memecah service jadi banyak**. Di sini, CQRS diterapkan di dalam satu aplikasi (modular monolith), dengan dua datastore yang masing-masing dioptimasi untuk perannya masing-masing.
+This project focuses on a pattern that's often misunderstood: **CQRS is about separating read and write responsibility, not a reason to split everything into separate services.** Here, CQRS is applied inside a single application (modular monolith), with two datastores each optimized for its own role.
 
-## Fitur
+## Features
 
-- 📁 Buat project & task, assign ke user, ubah status (To Do → In Progress → Done) — via REST API
-- 📊 Board view & dashboard workload per user — data dibaca dari read model yang sudah dioptimasi untuk tampilan
-- 🔄 Live update board secara real-time saat task berubah status, lewat gRPC server-streaming
-- ⚙️ Sinkronisasi read model otomatis di background, tanpa message broker
+- 📁 Create projects and tasks, change status (To Do → In Progress → Done) — via REST API
+- 📊 Board view and per-user workload dashboard — data read from a view model already denormalized for display
+- 🔄 Real-time board updates when a task's status changes, via gRPC server-streaming
+- ⚙️ Automatic background sync of the read model, with no message broker
 
 ## Tech Stack
 
 | | |
 |---|---|
 | **Backend** | Python, FastAPI |
-| **API** | REST (command & query) + gRPC/grpc-web (live update saja) |
+| **API** | REST (command & query) + gRPC/grpc-web (live updates only) |
 | **Write DB** | PostgreSQL |
 | **Read DB** | MongoDB |
 | **Frontend** | Vue 3 + Vite + Pinia |
 | **Infra** | Docker Compose |
 
-## Konsep Arsitektur
+## Architecture Concepts
 
-**CQRS** — command (tulis) divalidasi dan disimpan ke PostgreSQL sebagai source of truth. Query (baca) dilayani dari MongoDB dengan bentuk data yang sudah denormalized sesuai kebutuhan tampilan (board, dashboard), jadi tidak perlu join berat tiap kali user buka halaman.
+**CQRS** — commands (writes) are validated and persisted to PostgreSQL as the source of truth. Queries (reads) are served from MongoDB in a shape already denormalized for the view (board, dashboard), so no heavy joins are needed on every page load.
 
-**Outbox Pattern** — daripada menulis ke dua database sekaligus (rawan gagal setengah jalan), setiap command menyimpan sebuah "event" ke tabel outbox dalam transaksi yang sama dengan perubahan data. Sebuah background worker membaca event tersebut lalu memperbarui MongoDB. Konsekuensinya: ada jeda singkat antara data ditulis dan tampil di board (*eventual consistency*) — trade-off yang didokumentasikan, bukan disembunyikan.
+**Outbox Pattern** — rather than writing to two databases at once (which risks a partial failure), every command writes an "event" row to an outbox table in the same transaction as the data change. A background worker reads these events and updates MongoDB. The consequence: a short delay between a write landing and it showing up on the board (*eventual consistency*) — a documented trade-off, not something hidden.
 
-**gRPC (tepat sasaran, bukan default)** — gRPC tidak dipaksakan jadi protokol untuk semua endpoint. Command dan query biasa (create, update, get board) tetap pakai REST karena itu paling sederhana dan cukup. gRPC dipakai secara sengaja hanya untuk satu fitur yang memang cocok dengannya: **live update board** via server-streaming, dikonsumsi browser lewat grpc-web + Envoy proxy. Pemisahan ini menghindari pemakaian gRPC "asal ada", dan menunjukkan pemahaman kapan gRPC benar-benar unggul dibanding REST.
+**gRPC (used deliberately, not by default)** — gRPC isn't forced onto every endpoint. Ordinary commands and queries (create, update, get board) stay on REST, since that's the simplest and sufficient choice. gRPC is used intentionally for exactly one feature it's actually suited to: **live board updates** via server-streaming, consumed by the browser through grpc-web + an Envoy proxy. This separation avoids using gRPC "just because," and demonstrates an understanding of when gRPC genuinely outperforms REST.
 
-Detail keputusan arsitektur ada di [`docs/ADR.md`](docs/ADR.md).
+Architectural decision details live in [`docs/ADR.md`](docs/ADR.md).
 
-## Menjalankan Project
+## Running the Project
 
 ```bash
 git clone <repo-url>
@@ -44,34 +44,22 @@ cd taskflow
 docker compose up
 ```
 
+This project connects to a **native PostgreSQL install on the host**, not a containerized one — Postgres itself doesn't run in Docker here. Copy `.env.example` to `.env` at the repo root and set `DATABASE_URL` to point at your own local Postgres instance before running `docker compose up`. See [`docs/RUNNING_WITHOUT_DOCKER.md`](docs/RUNNING_WITHOUT_DOCKER.md) for the exact steps.
+
 - Backend REST: `localhost:8000`
 - Backend gRPC (streaming): `localhost:50051`
 - Frontend: `localhost:5173`
-- Envoy (grpc-web proxy, khusus stream): `localhost:8081`
-- Postgres (buat diakses dari DBeaver/psql dsb): `localhost:5433`, user/password/db `taskflow`/`taskflow`/`taskflow`
-- Mongo (buat diakses dari MongoDB Compass dsb): `localhost:27017`
+- Envoy (grpc-web proxy, streaming route only): `localhost:8081`
+- Mongo (for MongoDB Compass, etc.): `localhost:27017`
 
-> Port Postgres di-host sebagai `5433` (bukan default `5432`) supaya tidak\
-> bentrok kalau kamu sudah punya instalasi Postgres native di komputer sendiri\
-> yang juga listen di `5432` — keduanya server yang sama sekali terpisah\
-> (beda data, beda kredensial), cuma kebetulan mau pakai port default yang sama.
+Docker here is just an orchestration convenience (Mongo + Envoy + the app together) — not a requirement of CQRS or gRPC themselves. Steps to run without Docker entirely are in [`docs/RUNNING_WITHOUT_DOCKER.md`](docs/RUNNING_WITHOUT_DOCKER.md).
 
-Docker di sini cuma kemudahan orkestrasi (Postgres + Mongo + Envoy + app sekaligus) — bukan requirement dari CQRS atau gRPC itu sendiri. Cara menjalankan tanpa Docker ada di [`docs/RUNNING_WITHOUT_DOCKER.md`](docs/RUNNING_WITHOUT_DOCKER.md).
-
-## Struktur Project
+## Project Structure
 
 ```
 taskflow/
-├── backend/     # FastAPI (REST) + gRPC server (streaming saja), command/query handlers, outbox worker
+├── backend/     # FastAPI (REST) + gRPC server (streaming only), command/query handlers, outbox worker
 ├── frontend/    # Vue 3 app
-├── envoy/       # grpc-web proxy config (route khusus StreamBoardUpdates)
-└── docs/        # ADR & diagram arsitektur
+├── envoy/       # grpc-web proxy config (StreamBoardUpdates route only)
+└── docs/        # ADR & architecture notes
 ```
-
-## Demo
-
-*(tambahkan screenshot / GIF board view & live update di sini)*
-
-## Lisensi
-
-MIT

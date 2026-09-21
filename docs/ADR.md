@@ -1,94 +1,95 @@
 # Architecture Decision Record — TaskFlow
 
-## 1. CQRS di dalam satu modular monolith, bukan microservices
+## 1. CQRS within a single modular monolith, not microservices
 
-**Keputusan:** Command (write) dan query (read) dipisah secara internal — model, repository,
-dan datastore berbeda — tapi tetap satu deployable unit, satu codebase, satu `docker-compose.yml`.
+**Decision:** Command (write) and query (read) are separated internally — different models,
+repositories, and datastores — but remain a single deployable unit, one codebase, one
+`docker-compose.yml`.
 
-**Kenapa:** CQRS sering disalahartikan sebagai alasan untuk memecah aplikasi jadi command-service
-dan query-service yang terpisah. Padahal inti CQRS adalah pemisahan *tanggung jawab* baca/tulis
-(model data, validasi, bentuk response), bukan pemisahan *deployment*. Memecah jadi microservice di
-project sekecil ini hanya menambah operational overhead (network call tambahan, service discovery,
-deployment terpisah) tanpa manfaat konkret, karena beban baca dan tulis di sini tidak butuh scaling
-independen.
+**Rationale:** CQRS is often misread as a reason to split an application into a separate
+command-service and query-service. In fact, the core of CQRS is separating read/write
+*responsibility* (data model, validation, response shape), not separating *deployment*. Splitting
+this into microservices at this project's scale would only add operational overhead (extra network
+calls, service discovery, separate deployments) with no concrete benefit, since read and write load
+here don't need to scale independently.
 
-**Trade-off:** Kalau suatu saat query load jauh lebih besar dari command load dan perlu di-scale
-terpisah, modular monolith ini harus dipecah dulu — tapi karena command/query sudah terpisah secara
-internal (handler, repository, datastore), pemisahan itu jadi boundary yang jelas untuk dipecah,
-bukan refactor besar dari nol.
+**Trade-off:** If query load ever grows far beyond command load and needs to scale separately, this
+modular monolith would need to be split first — but because command and query are already separated
+internally (handlers, repositories, datastores), that separation gives a clear boundary to split
+along, rather than requiring a rewrite from scratch.
 
 ## 2. PostgreSQL (write) + MongoDB (read) — polyglot persistence
 
-**Keputusan:** Semua command tervalidasi dan disimpan ke PostgreSQL sebagai source of truth. Semua
-query dilayani dari koleksi MongoDB yang sudah didenormalisasi sesuai kebutuhan tampilan (board per
-project, workload per user).
+**Decision:** Every command is validated and persisted to PostgreSQL as the source of truth. Every
+query is served from MongoDB collections already denormalized for the view they back (per-project
+board, per-user workload).
 
-**Kenapa:** Data write (task, project) punya relasi dan constraint yang jelas (task harus punya
-project yang valid, status harus salah satu dari beberapa nilai) — cocok untuk relational DB dengan
-transaction guarantee. Data read untuk board view butuh bentuk yang sudah dikelompokkan per status
-kolom, siap tampil tanpa join — cocok untuk document store yang bentuknya sudah menyerupai response
-API.
+**Rationale:** Write data (tasks, projects) has clear relationships and constraints (a task must
+belong to a valid project, status must be one of a fixed set of values) — a good fit for a
+relational database with transactional guarantees. Read data for the board view needs a shape
+already grouped by status column, ready to render without joins — a good fit for a document store
+whose shape already resembles the API response.
 
-**Trade-off:** Dua datastore berarti dua skema untuk dijaga konsistenlogi-nya, dan butuh mekanisme
-sinkronisasi eksplisit (lihat #3) — kompleksitas ini tidak ada kalau pakai satu database untuk
-semuanya. Untuk aplikasi CRUD sederhana tanpa kebutuhan tampilan yang kompleks, satu Postgres saja
-sudah cukup dan lebih murah untuk dioperasikan.
+**Trade-off:** Two datastores means two schemas whose consistency must be actively maintained, and
+requires an explicit synchronization mechanism (see #3) — complexity that wouldn't exist with a
+single database for everything. For a simple CRUD app without complex view requirements, a single
+Postgres instance would be sufficient and cheaper to operate.
 
-## 3. Outbox Pattern untuk sinkronisasi, bukan dual-write atau message broker
+## 3. Outbox Pattern for synchronization, not dual-write or a message broker
 
-**Keputusan:** Command handler menulis perubahan data + row event ke tabel `outbox_events` dalam
-satu transaksi Postgres. Sebuah projector worker (polling, `FOR UPDATE SKIP LOCKED`) membaca event
-`PENDING`, memperbarui MongoDB, lalu menandai event `PROCESSED` (atau `FAILED` setelah retry
-habis).
+**Decision:** The command handler writes the data change and an event row to the `outbox_events`
+table in a single Postgres transaction. A projector worker (polling, `FOR UPDATE SKIP LOCKED`) reads
+`PENDING` events, updates MongoDB, then marks the event `PROCESSED` (or `FAILED` once retries are
+exhausted).
 
-**Kenapa:** Dual-write (tulis Postgres lalu langsung tulis Mongo di request yang sama) punya window
-kegagalan: kalau proses mati setelah Postgres commit tapi sebelum Mongo update, kedua datastore jadi
-tidak konsisten selamanya, tanpa cara otomatis untuk pulih. Outbox pattern memindahkan window
-kegagalan itu ke tempat yang bisa di-retry: event tersimpan permanen di Postgres (atomic dengan
-data-nya sendiri, dalam satu transaksi), jadi projector bisa mati dan hidup lagi kapan saja tanpa
-kehilangan event.
+**Rationale:** Dual-write (writing to Postgres, then immediately writing to Mongo within the same
+request) has a failure window: if the process dies after the Postgres commit but before the Mongo
+update, the two datastores become permanently inconsistent, with no automatic way to recover. The
+Outbox Pattern moves that failure window somewhere retryable: the event is stored permanently in
+Postgres (atomically with its own data, in a single transaction), so the projector can die and come
+back at any time without losing an event.
 
-Dipilih *polling* (bukan `LISTEN/NOTIFY` atau message broker seperti Kafka/RabbitMQ) karena scope
-project ini tidak butuh latency sub-detik, dan menambah broker berarti menambah satu lagi moving
-part untuk di-operate — tidak sepadan untuk mini task board ini.
+Polling was chosen (rather than `LISTEN/NOTIFY` or a message broker like Kafka/RabbitMQ) because
+this project's scope doesn't need sub-second latency, and adding a broker means adding another
+moving part to operate — not worth it for a mini task board like this.
 
-**Trade-off (didokumentasikan, bukan disembunyikan):**
-- **Eventual consistency** — ada jeda antara task berubah status di Postgres dan tampil berubah di
-  board (Mongo). Jeda ini terlihat di UI (indikator "syncing"), bukan disembunyikan seolah update
-  real-time instan.
-- **Kompleksitas tambahan** dibanding CRUD biasa: tabel outbox, worker terpisah, logic retry/dead
-  letter (`retry_count`, status `FAILED`).
-- **Idempotency wajib** di sisi projector: karena event bisa diproses ulang (misal kalau projector
-  crash setelah update Mongo tapi sebelum menandai `PROCESSED`), rebuild board/workload document
-  dilakukan dengan *full recompute* dari Postgres per project/user, bukan increment — supaya
-  pemrosesan ulang event yang sama tidak menduplikasi data.
+**Trade-offs (documented, not hidden):**
+- **Eventual consistency** — there is a delay between a task's status changing in Postgres and that
+  change appearing on the board (Mongo). This delay is made visible in the UI (a "syncing"
+  indicator), rather than hidden behind a pretense of instant real-time updates.
+- **Added complexity** compared to plain CRUD: an outbox table, a separate worker, retry/dead-letter
+  logic (`retry_count`, `FAILED` status).
+- **Idempotency is required** on the projector side: since an event can be reprocessed (for example,
+  if the projector crashes after updating Mongo but before marking the event `PROCESSED`), rebuilding
+  the board/workload document is done via a *full recompute* from Postgres per project/user, rather
+  than an increment — so reprocessing the same event never duplicates data.
 
-## 4. gRPC hanya untuk `StreamBoardUpdates`, REST untuk semuanya
+## 4. gRPC only for `StreamBoardUpdates`, REST for everything else
 
-**Keputusan:** Semua command dan query (create project, create task, ubah status, assign, get
-board, get workload) lewat REST/JSON biasa. Satu-satunya RPC gRPC adalah
-`BoardStreamService.StreamBoardUpdates` — server-streaming untuk live update board, diekspos ke
-browser lewat grpc-web + Envoy proxy (endpoint REST lain tidak lewat Envoy sama sekali).
+**Decision:** Every command and query (create project, create task, change status, assign, get
+board, get workload) goes through plain REST/JSON. The only gRPC RPC is
+`BoardStreamService.StreamBoardUpdates` — server-streaming for live board updates, exposed to the
+browser via grpc-web + an Envoy proxy (no other REST endpoint goes through Envoy at all).
 
-**Kenapa:** gRPC unggul dibanding REST untuk kasus yang memang butuh streaming multipleks di satu
-koneksi HTTP/2 — live update board persis kasus itu. Untuk CRUD biasa, REST/JSON lebih sederhana,
-lebih mudah di-debug (bisa `curl` langsung), dan tidak butuh code generation di frontend. Memaksakan
-gRPC untuk semua endpoint hanya untuk konsistensi protokol tidak memberi manfaat nyata di sini, dan
-menambah friksi development (perlu regenerate stub untuk setiap perubahan schema kecil).
+**Rationale:** gRPC outperforms REST specifically for cases that need multiplexed streaming over a
+single HTTP/2 connection — live board updates are exactly that case. For plain CRUD, REST/JSON is
+simpler, easier to debug (a direct `curl` works), and needs no code generation on the frontend.
+Forcing gRPC onto every endpoint purely for protocol consistency would provide no real benefit here,
+and would add development friction (regenerating stubs for every small schema change).
 
-**Trade-off:** Frontend perlu dua jalur klien berbeda (axios untuk REST, grpc-web client generated
-untuk stream) dan satu proxy tambahan (Envoy) khusus untuk RPC ini. Ini kompleksitas ekstra yang
-sengaja diterima karena manfaatnya (server push yang efisien, di luar konteks microservice) memang
-dipakai secara nyata, bukan sekadar dipasang.
+**Trade-off:** The frontend needs two distinct client paths (axios for REST, a generated grpc-web
+client for the stream) and one extra proxy (Envoy) dedicated to this single RPC. This is extra
+complexity accepted deliberately, because its benefit (efficient server push, outside a microservice
+context) is genuinely used here, not merely included for show.
 
-## 5. Tidak ada tabel `users`
+## 5. No `users` table
 
-**Keputusan:** `owner_id` dan `assignee_id` disimpan sebagai UUID mentah tanpa tabel `users`
-terpisah; read model menampilkan ID tersebut sebagai representasi nama.
+**Decision:** `owner_id` and `assignee_id` are stored as raw UUIDs with no separate `users` table;
+the read model displays these IDs as a stand-in for a name.
 
-**Kenapa:** Manajemen user (auth, profile) di luar scope demonstrasi CQRS/Outbox/gRPC yang menjadi
-fokus project ini. Menambahkannya hanya menambah permukaan kode tanpa menunjukkan pattern baru yang
-relevan dengan tujuan portfolio ini.
+**Rationale:** User management (auth, profiles) is outside the scope of the CQRS/Outbox/gRPC patterns
+this project sets out to demonstrate. Adding it would only add surface area without demonstrating any
+pattern relevant to this project's purpose.
 
-**Trade-off:** Board dan dashboard menampilkan UUID, bukan nama manusia yang enak dibaca — cukup
-untuk demo pattern, tidak cukup untuk produksi nyata.
+**Trade-off:** The board and dashboard display raw UUIDs rather than human-readable names — sufficient
+for demonstrating the pattern, not sufficient for real production use.
